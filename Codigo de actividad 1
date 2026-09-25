@@ -1,0 +1,441 @@
+import time
+import random
+import RPi.GPIO as GPIO
+import board
+import smbus
+import adafruit_dht
+
+# ==========================================
+# 1. CONFIGURACIÓN DE PINES Y HARDWARE
+# ==========================================
+GPIO.setmode(GPIO.BCM)
+GPIO.setwarnings(False)
+
+# Pines GPIO
+PIN_SW = 17              
+PIN_LED1 = 6            
+PIN_BUZZER = 18          
+PIN_R = 22              
+PIN_G = 23              
+PIN_B = 24              
+
+GPIO.setup(PIN_SW, GPIO.IN, pull_up_down=GPIO.PUD_UP)
+GPIO.setup(PIN_LED1, GPIO.OUT)
+GPIO.setup(PIN_BUZZER, GPIO.OUT)
+GPIO.setup(PIN_R, GPIO.OUT)
+GPIO.setup(PIN_G, GPIO.OUT)
+GPIO.setup(PIN_B, GPIO.OUT)
+
+buzzer_pwm = GPIO.PWM(PIN_BUZZER, 440)
+sensor = adafruit_dht.DHT11(board.D4)
+
+I2C_ADDRESS = 0x48
+try:
+    bus = smbus.SMBus(1)
+    i2c_disponible = True
+except Exception as e:
+    i2c_disponible = False
+    print(f"Aviso: Bus I2C no detectado. Error: {e}")
+
+# ==========================================
+# 2. BASE DE DATOS Y EQUIPO (CON TIPOS DE ATAQUE)
+# ==========================================
+equipo_jugador = []
+
+zona_safari = {
+    "Bosque": {
+        "Bulbasaur": {"tipo": "Planta", "habitat": "Bosque", "hp_max": 45, "prob_captura": 40, "cantidad": 1, "ataques": [{"nombre": "Placaje", "daño": 10, "tipo": "Normal"}, {"nombre": "Látigo Cepa", "daño": 15, "tipo": "Planta"}]},
+        "Oddish": {"tipo": "Planta", "habitat": "Bosque", "hp_max": 40, "prob_captura": 70, "cantidad": 3, "ataques": [{"nombre": "Absorber", "daño": 10, "tipo": "Planta"}, {"nombre": "Ácido", "daño": 12, "tipo": "Veneno"}]},
+        "Caterpie": {"tipo": "Bicho", "habitat": "Bosque", "hp_max": 30, "prob_captura": 90, "cantidad": 3, "ataques": [{"nombre": "Placaje", "daño": 8, "tipo": "Normal"}, {"nombre": "Picadura", "daño": 10, "tipo": "Bicho"}]}
+    },
+    "Pradera": {
+        "Pikachu": {"tipo": "Eléctrico", "habitat": "Pradera", "hp_max": 35, "prob_captura": 50, "cantidad": 1, "ataques": [{"nombre": "Impactrueno", "daño": 15, "tipo": "Eléctrico"}, {"nombre": "Ataque Rápido", "daño": 10, "tipo": "Normal"}]},
+        "Eevee": {"tipo": "Normal", "habitat": "Pradera", "hp_max": 40, "prob_captura": 60, "cantidad": 2, "ataques": [{"nombre": "Placaje", "daño": 10, "tipo": "Normal"}, {"nombre": "Mordisco", "daño": 12, "tipo": "Normal"}]},
+        "Meowth": {"tipo": "Normal", "habitat": "Pradera", "hp_max": 35, "prob_captura": 45, "cantidad": 3, "ataques": [{"nombre": "Arañazo", "daño": 10, "tipo": "Normal"}, {"nombre": "Golpes Furia", "daño": 12, "tipo": "Normal"}]}
+    },
+    "Cueva": {
+        "Onix": {"tipo": "Roca", "habitat": "Cueva", "hp_max": 60, "prob_captura": 30, "cantidad": 1, "ataques": [{"nombre": "Lanzarrocas", "daño": 15, "tipo": "Roca"}, {"nombre": "Placaje", "daño": 10, "tipo": "Normal"}]},
+        "Geodude": {"tipo": "Roca", "habitat": "Cueva", "hp_max": 45, "prob_captura": 65, "cantidad": 3, "ataques": [{"nombre": "Placaje", "daño": 10, "tipo": "Normal"}, {"nombre": "Lanzarrocas", "daño": 12, "tipo": "Roca"}]},
+        "Zubat": {"tipo": "Veneno", "habitat": "Cueva", "hp_max": 35, "prob_captura": 85, "cantidad": 3, "ataques": [{"nombre": "Chupavidas", "daño": 8, "tipo": "Bicho"}, {"nombre": "Mordisco", "daño": 12, "tipo": "Normal"}]}
+    },
+    "Pantano": {
+        "Psyduck": {"tipo": "Agua", "habitat": "Pantano", "hp_max": 45, "prob_captura": 55, "cantidad": 2, "ataques": [{"nombre": "Arañazo", "daño": 10, "tipo": "Normal"}, {"nombre": "Pistola Agua", "daño": 15, "tipo": "Agua"}]},
+        "Poliwag": {"tipo": "Agua", "habitat": "Pantano", "hp_max": 40, "prob_captura": 70, "cantidad": 3, "ataques": [{"nombre": "Burbuja", "daño": 12, "tipo": "Agua"}, {"nombre": "Destructor", "daño": 10, "tipo": "Normal"}]},
+        "Lotad": {"tipo": "Agua", "habitat": "Pantano", "hp_max": 40, "prob_captura": 75, "cantidad": 3, "ataques": [{"nombre": "Impresionar", "daño": 10, "tipo": "Normal"}, {"nombre": "Absorber", "daño": 12, "tipo": "Planta"}]}
+    }
+}
+
+# ==========================================
+# 3. FUNCIONES DE RETROALIMENTACIÓN
+# ==========================================
+def color_rgb(r, g, b):
+    GPIO.output(PIN_R, r)
+    GPIO.output(PIN_G, g)
+    GPIO.output(PIN_B, b)
+
+def actualizar_led_habitat(habitat):
+    poblacion_total = sum(p["cantidad"] for p in zona_safari[habitat].values())
+    if poblacion_total > 0: GPIO.output(PIN_LED1, GPIO.HIGH)
+    else: GPIO.output(PIN_LED1, GPIO.LOW)
+
+def sonar_buzzer(frecuencia, duracion):
+    try:
+        buzzer_pwm.ChangeFrequency(frecuencia)
+        buzzer_pwm.start(50)
+        time.sleep(duracion)
+        buzzer_pwm.stop()
+    except Exception:
+        pass
+
+def tono_desplazamiento(): sonar_buzzer(800, 0.05)
+def tono_confirmacion():
+    sonar_buzzer(1400, 0.08)
+    time.sleep(0.02)
+    sonar_buzzer(1800, 0.12)
+def tono_aparicion():
+    sonar_buzzer(600, 0.1)
+    time.sleep(0.05)
+    sonar_buzzer(900, 0.2)
+def tono_captura_exitosa():
+    sonar_buzzer(1046, 0.1)
+    time.sleep(0.05)
+    sonar_buzzer(1318, 0.1)
+    time.sleep(0.05)
+    sonar_buzzer(1567, 0.3)
+def tono_escape():
+    sonar_buzzer(400, 0.2)
+    time.sleep(0.1)
+    sonar_buzzer(300, 0.4)
+def tono_ataque(): sonar_buzzer(1200, 0.1)
+def tono_dano_critico():
+    sonar_buzzer(2000, 0.1)
+    time.sleep(0.05)
+    sonar_buzzer(2000, 0.1)
+def tono_debilitado():
+    sonar_buzzer(300, 0.3)
+    time.sleep(0.1)
+    sonar_buzzer(250, 0.5)
+
+# ==========================================
+# 4. HARDWARE Y SENSORES
+# ==========================================
+def leer_eje_y_i2c():
+    if not i2c_disponible: return 13000
+    try:
+        bus.write_i2c_block_data(I2C_ADDRESS, 0x01, [0xD3, 0x83])
+        time.sleep(0.01)
+        data = bus.read_i2c_block_data(I2C_ADDRESS, 0x00, 2)
+        return (data[0] << 8) | data[1]
+    except Exception: return 13000
+
+def leer_joystick():
+    if GPIO.input(PIN_SW) == GPIO.LOW:
+        time.sleep(0.2)
+        return "SELECT"
+    valor_y = leer_eje_y_i2c()
+    if valor_y < 5000:
+        time.sleep(0.2)
+        return "ARRIBA"
+    elif valor_y > 21000:
+        time.sleep(0.2)
+        return "ABAJO"
+    return None
+
+def obtener_clima_y_habitats():
+    habitats = []
+    try:
+        temperatura = sensor.temperature
+        humedad = sensor.humidity
+        print(f"\n[SENSOR DHT11] Temp: {temperatura}°C | Humedad: {humedad}%")
+        if temperatura is not None and humedad is not None:
+            if temperatura < 21.0: habitats.append("Cueva")
+            else: habitats.append("Pradera")
+            if humedad >= 55.0: habitats.append("Pantano")
+            else: habitats.append("Bosque")
+        else: print("El sensor arrojó valores vacíos.")
+    except RuntimeError as error:
+        print(f"Error de lectura: {error.args[0]}")
+        habitats = ["Pradera", "Bosque"]
+    return habitats
+
+def navegar_menu(opciones, titulo="SELECCIONE UNA OPCIÓN"):
+    indice = 0
+    total = len(opciones)
+    while True:
+        print("\n" + "="*35)
+        print(f" {titulo}")
+        print("="*35)
+        for i, opcion in enumerate(opciones):
+            indicador = "-> " if i == indice else "   "
+            print(f"{indicador}{opcion}")
+        while True:
+            accion = leer_joystick()
+            if accion == "ARRIBA":
+                indice = (indice - 1) % total
+                tono_desplazamiento()
+                break
+            elif accion == "ABAJO":
+                indice = (indice + 1) % total
+                tono_desplazamiento()
+                break
+            elif accion == "SELECT":
+                tono_confirmacion()
+                return opciones[indice]
+            time.sleep(0.05)
+
+# ==========================================
+# 5. SISTEMA DE COMBATE Y TIPOS
+# ==========================================
+def calcular_efectividad(tipo_ataque, tipo_defensa):
+    efectividad = {
+        "Planta": {"Agua": 2.0, "Roca": 2.0, "Veneno": 0.5, "Bicho": 0.5},
+        "Agua": {"Roca": 2.0, "Planta": 0.5},
+        "Roca": {"Bicho": 2.0, "Eléctrico": 2.0, "Agua": 0.5, "Planta": 0.5},
+        "Bicho": {"Planta": 2.0, "Roca": 0.5},
+        "Eléctrico": {"Agua": 2.0, "Roca": 0.5, "Planta": 0.5},
+        "Veneno": {"Planta": 2.0, "Roca": 0.5},
+        "Normal": {"Roca": 0.5}
+    }
+    if tipo_ataque in efectividad and tipo_defensa in efectividad[tipo_ataque]:
+        return efectividad[tipo_ataque][tipo_defensa]
+    return 1.0
+
+def gestionar_captura_llena(nuevo_pkmn, datos_nuevo):
+    nombres_equipo = [f"{p['nombre']} [{p['datos']['tipo']}]" for p in equipo_jugador]
+    print("\n¡Tu equipo está lleno! Debes liberar a un Pokémon.")
+    eleccion_str = navegar_menu(nombres_equipo + ["Cancelar captura"], "¿A QUIÉN LIBERARÁS?")
+   
+    if eleccion_str != "Cancelar captura":
+        nombre_real = eleccion_str.split(" [")[0]
+        for i, p in enumerate(equipo_jugador):
+            if p["nombre"] == nombre_real:
+                del equipo_jugador[i]
+                break
+        equipo_jugador.append({"nombre": nuevo_pkmn, "datos": dict(datos_nuevo)})
+        print(f"Has liberado a {nombre_real}. ¡Bienvenido {nuevo_pkmn}!")
+        tono_captura_exitosa()
+    else:
+        print(f"Dejaste ir a {nuevo_pkmn}.")
+
+def iniciar_combate(pkmn_salvaje, datos_salvaje):
+    nombres_equipo = [f"{p['nombre']} [{p['datos']['tipo']}]" for p in equipo_jugador]
+    pkmn_elegido_str = navegar_menu(nombres_equipo, "ELIGE TU POKÉMON PARA LUCHAR")
+    nombre_mio = pkmn_elegido_str.split(" [")[0]
+   
+    mi_pkmn = next(p for p in equipo_jugador if p["nombre"] == nombre_mio)
+    hp_mio = mi_pkmn["datos"]["hp_max"]
+    hp_rival = datos_salvaje["hp_max"]
+   
+    print("\n" + "!"*35)
+    print(f"  ¡BATALLA! {mi_pkmn['nombre'].upper()} VS {pkmn_salvaje.upper()}")
+    print("!"*35)
+    tono_aparicion()
+    color_rgb(1, 0, 1)
+    time.sleep(1)
+
+    while hp_mio > 0 and hp_rival > 0:
+        # Turno del Jugador
+        nombres_ataques = [f"{atk['nombre']} [{atk['tipo']}]" for atk in mi_pkmn["datos"]["ataques"]]
+        atk_elegido_str = navegar_menu(nombres_ataques, f"TU HP: {hp_mio} | RIVAL HP: {hp_rival}")
+        nombre_atk = atk_elegido_str.split(" [")[0]
+       
+        datos_atk = next(a for a in mi_pkmn["datos"]["ataques"] if a["nombre"] == nombre_atk)
+        mult = calcular_efectividad(datos_atk["tipo"], datos_salvaje["tipo"])
+        daño_final = int(datos_atk["daño"] * mult)
+        hp_rival -= daño_final
+       
+        print(f"\n¡{mi_pkmn['nombre']} usó {nombre_atk}!")
+        if mult > 1.0:
+            print("¡Es muy efectivo!")
+            tono_dano_critico()
+            color_rgb(0, 0, 1)
+        elif mult < 1.0:
+            print("No es muy efectivo...")
+            tono_ataque()
+           
+        time.sleep(1)
+        color_rgb(1, 0, 1)
+        if hp_rival <= 0: break
+
+        # Turno del Rival
+        atk_rival = random.choice(datos_salvaje["ataques"])
+        mult_rival = calcular_efectividad(atk_rival["tipo"], mi_pkmn["datos"]["tipo"])
+        daño_rival = int(atk_rival["daño"] * mult_rival)
+        hp_mio -= daño_rival
+
+        print(f"\n¡El {pkmn_salvaje} enemigo usó {atk_rival['nombre']}!")
+        if mult_rival > 1.0: print("¡Fue muy efectivo contra ti!")
+        tono_ataque()
+        color_rgb(1, 0, 0)
+        time.sleep(0.5)
+        color_rgb(1, 0, 1)
+        time.sleep(1)
+
+    # Resultados
+    if hp_mio <= 0:
+        print(f"\n¡Oh no! ¡Tu {mi_pkmn['nombre']} se ha debilitado!")
+        print("Regla Nuzlocke: Tu Pokémon ha muerto y abandona tu equipo.")
+        equipo_jugador.remove(mi_pkmn)
+        color_rgb(0, 1, 0)
+        tono_debilitado()
+        time.sleep(3)
+        color_rgb(0, 0, 0)
+    elif hp_rival <= 0:
+        print(f"\n¡Has derrotado al {pkmn_salvaje} salvaje!")
+        datos_salvaje["cantidad"] -= 1
+        color_rgb(1, 0, 0)
+        tono_captura_exitosa()
+        time.sleep(1)
+       
+        if navegar_menu(["Sí", "No"], f"¿Quieres atrapar a {pkmn_salvaje} derrotado?") == "Sí":
+            if len(equipo_jugador) < 6:
+                equipo_jugador.append({"nombre": pkmn_salvaje, "datos": dict(datos_salvaje)})
+                print(f"¡{pkmn_salvaje} fue añadido a tu equipo!")
+                tono_captura_exitosa()
+            else:
+                gestionar_captura_llena(pkmn_salvaje, datos_salvaje)
+        color_rgb(0, 0, 0)
+
+# ==========================================
+# 6. BUCLE PRINCIPAL DEL JUEGO
+# ==========================================
+try:
+    while True:
+        color_rgb(0, 0, 0)
+        GPIO.output(PIN_LED1, GPIO.LOW)
+       
+        habitats_validos = obtener_clima_y_habitats()
+        if not habitats_validos:
+            time.sleep(2)
+            continue
+           
+        opciones_principales = habitats_validos + ["Ver Mi Equipo", "Actualizar Clima", "Salir"]
+        eleccion_habitat = navegar_menu(opciones_principales, "ZONA SAFARI - MENÚ PRINCIPAL")
+
+        if eleccion_habitat == "Salir":
+            print("\n¡Gracias por visitar la Zona Safari Pokémon!")
+            break
+        elif eleccion_habitat == "Actualizar Clima":
+            continue
+        elif eleccion_habitat == "Ver Mi Equipo":
+            if not equipo_jugador:
+                print("\nTu equipo está vacío. ¡Ve a explorar para atrapar a tu primer Pokémon!")
+                time.sleep(2)
+                continue
+           
+            nombres_equipo = [f"{p['nombre']} [{p['datos']['tipo']}]" for p in equipo_jugador]
+            eleccion_str = navegar_menu(nombres_equipo + ["Volver"], "MI EQUIPO POKÉMON")
+           
+            if eleccion_str != "Volver":
+                nombre_real = eleccion_str.split(" [")[0]
+                mi_pkmn = next(p for p in equipo_jugador if p["nombre"] == nombre_real)
+                datos = mi_pkmn["datos"]
+                print("\n" + "*"*35)
+                print(f"       COMPAÑERO: {nombre_real.upper()}")
+                print("*"*35)
+                print(f" Tipo: {datos['tipo']} | HP Máximo: {datos['hp_max']}")
+                print(f" Ataque 1: {datos['ataques'][0]['nombre']} [{datos['ataques'][0]['tipo']}] (Daño: {datos['ataques'][0]['daño']})")
+                print(f" Ataque 2: {datos['ataques'][1]['nombre']} [{datos['ataques'][1]['tipo']}] (Daño: {datos['ataques'][1]['daño']})")
+                print("*"*35)
+                print("\nPresiona el botón del joystick para regresar...")
+                while leer_joystick() != "SELECT": time.sleep(0.05)
+                tono_confirmacion()
+            continue
+
+        while True:
+            actualizar_led_habitat(eleccion_habitat)
+            accion_habitat = navegar_menu(["Próxima aventura", "Ver Pokédex", "Volver"], f"EXPLORANDO {eleccion_habitat.upper()}")
+
+            if accion_habitat == "Volver":
+                GPIO.output(PIN_LED1, GPIO.LOW)
+                break
+               
+            elif accion_habitat == "Ver Pokédex":
+                pokemon_disponibles = [f"{n} [{d['tipo']}]" for n, d in zona_safari[eleccion_habitat].items() if d["cantidad"] > 0]
+                if not pokemon_disponibles:
+                    print("\n¡No quedan Pokémon en esta zona!")
+                    time.sleep(1.5)
+                    continue
+                eleccion_str = navegar_menu(pokemon_disponibles + ["Volver"], "SELECCIONA UN POKÉMON")
+                if eleccion_str != "Volver":
+                    nombre_real = eleccion_str.split(" [")[0]
+                    datos = zona_safari[eleccion_habitat][nombre_real]
+                    print("\n" + "*"*35)
+                    print(f"       POKÉDEX: {nombre_real.upper()}")
+                    print("*"*35)
+                    print(f" Tipo: {datos['tipo']} | HP Max: {datos['hp_max']}")
+                    print(f" Prob. Captura: {datos['prob_captura']}% | Población: {datos['cantidad']}")
+                    print(f" Ataques: {datos['ataques'][0]['nombre']} [{datos['ataques'][0]['tipo']}], {datos['ataques'][1]['nombre']} [{datos['ataques'][1]['tipo']}]")
+                    print("*"*35)
+                    print("\nPresiona el botón para regresar...")
+                    while leer_joystick() != "SELECT": time.sleep(0.05)
+                    tono_confirmacion()
+
+            elif accion_habitat == "Próxima aventura":
+                pokemon_disponibles = [n for n, d in zona_safari[eleccion_habitat].items() if d["cantidad"] > 0]
+               
+                opciones_evento = ["Descansar", "Atrapar"]
+                if len(equipo_jugador) > 0 and len(pokemon_disponibles) > 0:
+                    opciones_evento.append("Combatir")
+               
+                if not pokemon_disponibles: evento_sorteado = "Descansar"
+                else: evento_sorteado = random.choice(opciones_evento)
+
+                if evento_sorteado == "Descansar":
+                    print(f"\n💤 DESCANSANDO EN {eleccion_habitat.upper()} 💤")
+                    print("Te tomas un momento de paz en la naturaleza.")
+                    while leer_joystick() != "SELECT": time.sleep(0.05)
+                    tono_confirmacion()
+
+                elif evento_sorteado == "Atrapar":
+                    pkmn_salvaje = random.choice(pokemon_disponibles)
+                    datos_pkmn = zona_safari[eleccion_habitat][pkmn_salvaje]
+                    probabilidad = datos_pkmn["prob_captura"]
+                   
+                    print(f"\n¡UN {pkmn_salvaje.upper()} [{datos_pkmn['tipo'].upper()}] SALVAJE APARECIÓ!")
+                    tono_aparicion()
+                    color_rgb(0, 0, 1)
+                   
+                    while True:
+                        accion = navegar_menu(["Lanzar Poké Ball", "Dar Comida", "Escapar"], f"ENCUENTRO: {pkmn_salvaje.upper()} (Prob: {probabilidad}%)")
+                        if accion == "Escapar":
+                            color_rgb(0, 1, 0)
+                            tono_escape()
+                            time.sleep(1)
+                            color_rgb(0, 0, 0)
+                            break
+                        elif accion == "Dar Comida":
+                            probabilidad = min(100, probabilidad + 15)
+                            sonar_buzzer(1200, 0.1)
+                        elif accion == "Lanzar Poké Ball":
+                            time.sleep(1)
+                            if random.randint(1, 100) <= probabilidad:
+                                print(f"¡Atrapaste a {pkmn_salvaje}!")
+                                color_rgb(1, 0, 0)
+                                tono_captura_exitosa()
+                                datos_pkmn["cantidad"] -= 1
+                               
+                                if len(equipo_jugador) < 6:
+                                    equipo_jugador.append({"nombre": pkmn_salvaje, "datos": dict(datos_pkmn)})
+                                else:
+                                    gestionar_captura_llena(pkmn_salvaje, datos_pkmn)
+                                time.sleep(2)
+                            else:
+                                print(f"¡{pkmn_salvaje} escapó!")
+                                color_rgb(0, 1, 0)
+                                tono_escape()
+                                time.sleep(2)
+                            color_rgb(0, 0, 0)
+                            break
+
+                elif evento_sorteado == "Combatir":
+                    pkmn_salvaje = random.choice(pokemon_disponibles)
+                    datos_pkmn = zona_safari[eleccion_habitat][pkmn_salvaje]
+                    iniciar_combate(pkmn_salvaje, datos_pkmn)
+
+finally:
+    buzzer_pwm.stop()
+    color_rgb(0, 0, 0)
+    GPIO.output(PIN_LED1, GPIO.LOW)
+    GPIO.cleanup()
+    sensor.exit()
